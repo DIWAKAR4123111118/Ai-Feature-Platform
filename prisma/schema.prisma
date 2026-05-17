@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Feature {
+  id          String          @id @default(uuid())
+  name        String          @unique
+  slug        String          @unique
+  description String?
+  status      String          @default("draft")
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  repos       FeatureRepo[]
+  versions    FeatureVersion[]
+}
+
+model FeatureRepo {
+  id            String    @id @default(uuid())
+  featureId     String
+  provider      String
+  owner         String
+  repo          String
+  repoUrl       String
+  stars         Int?
+  licenseSpdx   String?
+  lastCommitAt  DateTime?
+  archived      Boolean   @default(false)
+  healthScore   Float?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  feature       Feature   @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  scans         Scan[]
+
+  @@unique([provider, owner, repo])
+}
+
+model FeatureVersion {
+  id              String   @id @default(uuid())
+  featureId       String
+  versionLabel    String
+  sourceCommit    String
+  adapterVersion  String
+  approvalStatus  String   @default("pending")
+  approvedAt      DateTime?
+  approvedBy      String?
+  createdAt       DateTime @default(now())
+
+  feature         Feature  @relation(fields: [featureId], references: [id], onDelete: Cascade)
+}
+
+model Scan {
+  id              String        @id @default(uuid())
+  featureRepoId   String
+  scanType        String
+  status          String
+  toolName        String
+  toolVersion     String?
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  summary         Json          @default("{}")
+  rawArtifactPath String?
+  createdAt       DateTime      @default(now())
+
+  featureRepo     FeatureRepo   @relation(fields: [featureRepoId], references: [id], onDelete: Cascade)
+  findings        ScanFinding[]
+}
+
+model ScanFinding {
+  id              String   @id @default(uuid())
+  scanId          String
+  severity        String?
+  title           String
+  packageName     String?
+  affectedVersion String?
+  fixedVersion    String?
+  advisoryUrl     String?
+  location        Json?
+  findingHash     String
+
+  scan            Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  @@unique([scanId, findingHash])
+}
