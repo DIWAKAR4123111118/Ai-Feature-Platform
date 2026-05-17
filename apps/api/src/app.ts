@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { logger } from './logger';
 import featuresRouter from './routes/features';
+import scansRouter from './routes/scans';
 
 const app = express();
 
@@ -19,6 +20,7 @@ app.get('/health', (req, res) => {
 });
 
 app.use('/features', featuresRouter);
+app.use('/', scansRouter);
 
 // Error handler
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
