@@ -2,14 +2,23 @@ import app from './app';
 import { config } from './config/env';
 import { logger } from './logger';
 
-const server = app.listen(config.port, () => {
-  logger.info({ port: config.port, env: config.nodeEnv }, 'API server started');
+const port = config.port || 3000;
+
+const server = app.listen(port, () => {
+  logger.info({ port, env: config.nodeEnv }, 'API server started');
 });
 
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    logger.info('Server closed');
+const shutdown = () => {
+  logger.info('Shutdown signal received, closing server');
+  server.close(err => {
+    if (err) {
+      logger.error({ err }, 'Error during server close');
+      process.exit(1);
+    }
+    logger.info('Server closed cleanly');
     process.exit(0);
   });
-});
+};
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

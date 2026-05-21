@@ -9,13 +9,16 @@ interface GitHubRepoData {
   archived: boolean;
 }
 
-export async function fetchGitHubRepoMetadata(owner: string, repo: string): Promise<GitHubRepoData | null> {
+export async function fetchGitHubRepoMetadata(
+  owner: string,
+  repo: string,
+): Promise<GitHubRepoData | null> {
   const url = `https://api.github.com/repos/${owner}/${repo}`;
-  
+
   try {
     const response = await fetch(url, {
       headers: {
-        'Accept': 'application/vnd.github.v3+json',
+        Accept: 'application/vnd.github.v3+json',
         'User-Agent': 'ai-feature-platform',
       },
     });
@@ -25,7 +28,7 @@ export async function fetchGitHubRepoMetadata(owner: string, repo: string): Prom
       return null;
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as GitHubRepoData;
     return data;
   } catch (error) {
     logger.error({ error, owner, repo }, 'Failed to fetch GitHub metadata');

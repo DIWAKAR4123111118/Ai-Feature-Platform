@@ -1,0 +1,17 @@
+{
+  "name": "@ai-feature-platform/eslint-adapter",
+  "version": "1.0.0",
+  "description": "ESLint adapter for AI Feature Platform",
+  "main": "adapter.js",
+  "scripts": {
+    "build": "tsc adapter.ts",
+    "docker:build": "docker build -t ai-feature-platform/eslint-adapter:latest ."
+  },
+  "dependencies": {
+    "eslint": "^8.57.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

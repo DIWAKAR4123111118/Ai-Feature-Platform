@@ -1,138 +1,166 @@
 import { Router } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { pool } from '../db';
 import { logger } from '../logger';
+import { authMiddleware, AuthRequest } from '../middleware/auth';
+import { scannerService } from '../services/scanner';
+import { eslintRepoScanner } from '../services/eslintRepoScanner';
 
 const router = Router();
-const prisma = new PrismaClient();
 
-// POST /repos/:repoId/scans - Trigger a new scan
-router.post('/repos/:repoId/scans', async (req, res) => {
+// Trigger OSV scan for a repository
+router.post(
+  '/repositories/:id/scan',
+  authMiddleware,
+  async (req: AuthRequest, res) => {
+    try {
+      const { id } = req.params;
+
+      // Get repository details
+      const repoResult = await pool.query(
+        'SELECT * FROM repositories WHERE id = $1',
+        [id],
+      );
+
+      if (repoResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      const repo = repoResult.rows[0];
+
+      // Create scan record
+      const scanRecord = await pool.query(
+        'INSERT INTO security_scans (repo_id, scan_type, vulnerabilities_count, passed) VALUES ($1, $2, $3, $4) RETURNING *',
+        [id, 'osv-scanner', 0, false],
+      );
+
+      const scanId = scanRecord.rows[0].id;
+
+      // Start async scan (don't await - run in background)
+      performScan(scanId, repo).catch((err) => {
+        logger.error({ err, scanId }, 'Background scan failed');
+      });
+
+      res.status(202).json({
+        message: 'Scan started',
+        scanId,
+        status: 'running',
+      });
+    } catch (error) {
+      logger.error({ error }, 'Failed to start scan');
+      res.status(500).json({ error: 'Failed to start scan' });
+    }
+  },
+);
+
+// Get scan results
+router.get(
+  '/scans/:id',
+  authMiddleware,
+  async (req: AuthRequest, res) => {
+    try {
+      const { id } = req.params;
+
+      const scanResult = await pool.query(
+        'SELECT * FROM security_scans WHERE id = $1',
+        [id],
+      );
+
+      if (scanResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Scan not found' });
+      }
+
+      res.json({ scan: scanResult.rows[0] });
+    } catch (error) {
+      logger.error({ error }, 'Failed to fetch scan');
+      res.status(500).json({ error: 'Failed to fetch scan' });
+    }
+  },
+);
+
+// Background OSV scan execution
+async function performScan(scanId: number, repo: any) {
+  let repoPath: string | null = null;
+
   try {
-    const { repoId } = req.params;
-    const { scanType, toolName, toolVersion } = req.body;
-
-    if (!scanType || !toolName) {
-      return res.status(400).json({ error: 'scanType and toolName are required' });
-    }
-
-    // Verify repo exists
-    const repo = await prisma.featureRepo.findUnique({
-      where: { id: repoId },
-    });
-
-    if (!repo) {
-      return res.status(404).json({ error: 'Repository not found' });
-    }
-
-    const scan = await prisma.scan.create({
-      data: {
-        featureRepoId: repoId,
-        scanType,
-        toolName,
-        toolVersion: toolVersion || null,
-        status: 'pending',
-        startedAt: new Date(),
-      },
-    });
-
-    logger.info({ scanId: scan.id, repoId, scanType }, 'Scan initiated');
-    res.status(201).json(scan);
-  } catch (error) {
-    logger.error({ error }, 'Failed to create scan');
-    res.status(500).json({ error: 'Failed to create scan' });
-  }
-});
-
-// GET /scans/:scanId - Get scan details with findings
-router.get('/scans/:scanId', async (req, res) => {
-  try {
-    const { scanId } = req.params;
-
-    const scan = await prisma.scan.findUnique({
-      where: { id: scanId },
-      include: {
-        findings: true,
-        featureRepo: true,
-      },
-    });
-
-    if (!scan) {
-      return res.status(404).json({ error: 'Scan not found' });
-    }
-
-    res.json(scan);
-  } catch (error) {
-    logger.error({ error }, 'Failed to get scan');
-    res.status(500).json({ error: 'Failed to get scan' });
-  }
-});
-
-// PATCH /scans/:scanId - Update scan status
-router.patch('/scans/:scanId', async (req, res) => {
-  try {
-    const { scanId } = req.params;
-    const { status, summary } = req.body;
-
-    const updateData: any = {};
-    if (status) updateData.status = status;
-    if (summary) updateData.summary = summary;
-    if (status === 'completed' || status === 'failed') {
-      updateData.finishedAt = new Date();
-    }
-
-    const scan = await prisma.scan.update({
-      where: { id: scanId },
-      data: updateData,
-    });
-
-    logger.info({ scanId, status }, 'Scan updated');
-    res.json(scan);
-  } catch (error: any) {
-    if (error.code === 'P2025') {
-      return res.status(404).json({ error: 'Scan not found' });
-    }
-    logger.error({ error }, 'Failed to update scan');
-    res.status(500).json({ error: 'Failed to update scan' });
-  }
-});
-
-// POST /scans/:scanId/findings - Add findings to a scan
-router.post('/scans/:scanId/findings', async (req, res) => {
-  try {
-    const { scanId } = req.params;
-    const { findings } = req.body;
-
-    if (!Array.isArray(findings) || findings.length === 0) {
-      return res.status(400).json({ error: 'findings array is required' });
-    }
-
-    const createdFindings = await Promise.all(
-      findings.map((finding: any) =>
-        prisma.scanFinding.create({
-          data: {
-            scanId,
-            severity: finding.severity || null,
-            title: finding.title,
-            packageName: finding.packageName || null,
-            affectedVersion: finding.affectedVersion || null,
-            fixedVersion: finding.fixedVersion || null,
-            advisoryUrl: finding.advisoryUrl || null,
-            location: finding.location || null,
-            findingHash: finding.findingHash,
-          },
-        })
-      )
+    logger.info(
+      { scanId, repoUrl: repo.github_url },
+      'Starting background scan',
     );
 
-    logger.info({ scanId, count: createdFindings.length }, 'Findings added');
-    res.status(201).json(createdFindings);
-  } catch (error: any) {
-    if (error.code === 'P2002') {
-      return res.status(409).json({ error: 'Duplicate finding detected' });
+    // Clone repository
+    repoPath = await scannerService.cloneRepository(repo.github_url, repo.id);
+
+    // Run OSV scan
+    const scanResult = await scannerService.runOSVScan(repoPath);
+
+    // Update scan record
+    await pool.query(
+      'UPDATE security_scans SET vulnerabilities_count = $1, passed = $2, result = $3 WHERE id = $4',
+      [
+        scanResult.vulnerabilitiesCount,
+        scanResult.status === 'passed',
+        JSON.stringify(scanResult),
+        scanId,
+      ],
+    );
+
+    logger.info({ scanId, status: scanResult.status }, 'Scan completed');
+  } catch (error) {
+    logger.error({ error, scanId }, 'Scan execution failed');
+
+    await pool.query(
+      'UPDATE security_scans SET passed = $1, result = $2 WHERE id = $3',
+      [false, JSON.stringify({ error: String(error) }), scanId],
+    );
+  } finally {
+    if (repoPath) {
+      await scannerService.cleanupWorkspace(repoPath);
     }
-    logger.error({ error }, 'Failed to add findings');
-    res.status(500).json({ error: 'Failed to add findings' });
   }
-});
+}
+
+// NEW: ESLint repo scan using adapter_executions + ESLint adapter
+router.post(
+  '/repositories/:id/eslint-scan',
+  authMiddleware,
+  async (req: AuthRequest, res) => {
+    try {
+      const { id } = req.params;
+
+      // Check repo exists (reuse DB via pool)
+      const repoResult = await pool.query(
+        'SELECT * FROM repositories WHERE id = $1',
+        [id],
+      );
+
+      if (repoResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      // Fire ESLint repo scan (background)
+      const repositoryId = Number(id);
+
+      eslintRepoScanner
+        .scanRepo(repositoryId, 'eslint')
+        .catch((err) => {
+          logger.error(
+            { err, repositoryId },
+            'ESLint repo scan failed in background',
+          );
+        });
+
+      return res.status(202).json({
+        message: 'ESLint repo scan started',
+        repositoryId,
+        adapter: 'eslint',
+      });
+    } catch (error) {
+      logger.error({ error }, 'Failed to start ESLint repo scan');
+      return res.status(500).json({
+        error: 'Failed to start ESLint repo scan',
+      });
+    }
+  },
+);
 
 export default router;
