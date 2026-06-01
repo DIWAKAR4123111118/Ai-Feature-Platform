@@ -1,7 +1,7 @@
-import { Router } from 'express';
+import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { logger } from '../logger';
-import { authMiddleware, AuthRequest } from '../middleware/auth';
+import { authMiddleware } from '../middleware/auth';
 import { scannerService } from '../services/scanner';
 import { eslintRepoScanner } from '../services/eslintRepoScanner';
 
@@ -11,14 +11,15 @@ const router = Router();
 router.post(
   '/repositories/:id/scan',
   authMiddleware,
-  async (req: AuthRequest, res) => {
+  async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
+      const idStr = Array.isArray(id) ? id[0] : id;
 
       // Get repository details
       const repoResult = await pool.query(
         'SELECT * FROM repositories WHERE id = $1',
-        [id],
+        [idStr],
       );
 
       if (repoResult.rows.length === 0) {
@@ -30,7 +31,7 @@ router.post(
       // Create scan record
       const scanRecord = await pool.query(
         'INSERT INTO security_scans (repo_id, scan_type, vulnerabilities_count, passed) VALUES ($1, $2, $3, $4) RETURNING *',
-        [id, 'osv-scanner', 0, false],
+        [idStr, 'osv-scanner', 0, false],
       );
 
       const scanId = scanRecord.rows[0].id;
@@ -40,14 +41,14 @@ router.post(
         logger.error({ err, scanId }, 'Background scan failed');
       });
 
-      res.status(202).json({
+      return res.status(202).json({
         message: 'Scan started',
         scanId,
         status: 'running',
       });
     } catch (error) {
       logger.error({ error }, 'Failed to start scan');
-      res.status(500).json({ error: 'Failed to start scan' });
+      return res.status(500).json({ error: 'Failed to start scan' });
     }
   },
 );
@@ -56,23 +57,24 @@ router.post(
 router.get(
   '/scans/:id',
   authMiddleware,
-  async (req: AuthRequest, res) => {
+  async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
+      const idStr = Array.isArray(id) ? id[0] : id;
 
       const scanResult = await pool.query(
         'SELECT * FROM security_scans WHERE id = $1',
-        [id],
+        [idStr],
       );
 
       if (scanResult.rows.length === 0) {
         return res.status(404).json({ error: 'Scan not found' });
       }
 
-      res.json({ scan: scanResult.rows[0] });
+      return res.json({ scan: scanResult.rows[0] });
     } catch (error) {
       logger.error({ error }, 'Failed to fetch scan');
-      res.status(500).json({ error: 'Failed to fetch scan' });
+      return res.status(500).json({ error: 'Failed to fetch scan' });
     }
   },
 );
@@ -123,14 +125,15 @@ async function performScan(scanId: number, repo: any) {
 router.post(
   '/repositories/:id/eslint-scan',
   authMiddleware,
-  async (req: AuthRequest, res) => {
+  async (req: Request, res: Response) => {
     try {
       const { id } = req.params;
+      const idStr = Array.isArray(id) ? id[0] : id;
 
       // Check repo exists (reuse DB via pool)
       const repoResult = await pool.query(
         'SELECT * FROM repositories WHERE id = $1',
-        [id],
+        [idStr],
       );
 
       if (repoResult.rows.length === 0) {
@@ -138,7 +141,7 @@ router.post(
       }
 
       // Fire ESLint repo scan (background)
-      const repositoryId = Number(id);
+      const repositoryId = Number(idStr);
 
       eslintRepoScanner
         .scanRepo(repositoryId, 'eslint')

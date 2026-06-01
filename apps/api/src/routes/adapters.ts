@@ -1,109 +1,155 @@
-import { Router } from 'express';
-import { pool } from '../db';
+// apps/api/src/routes/adapters.ts
+import { Router, Request, Response } from 'express';
+import { prisma } from '../prismaClient';
 import { logger } from '../logger';
 import { authMiddleware, AuthRequest } from '../middleware/auth';
 import { executeAdapter } from '../services/adapterExecutor';
+import {
+  assertRepositoryLicenseAllowsExecution,
+  LicenseExecutionError,
+} from '../services/licenseGuard';
 
 const router = Router();
 
 // Execute adapter on a repository
-router.post('/:repositoryId/execute', authMiddleware, async (req: AuthRequest, res) => {
-  try {
-    const { repositoryId } = req.params;
-    const { adapterName, filePath, input } = req.body;
+router.post(
+  '/:repositoryId/execute',
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const authReq = req as AuthRequest;
+      const { repositoryId } = authReq.params;
+      const repositoryIdStr = Array.isArray(repositoryId)
+        ? repositoryId[0]
+        : repositoryId;
+      const { adapterName, filePath, input } = authReq.body;
 
-    if (!adapterName || !input) {
-      return res.status(400).json({ error: 'adapterName and input are required' });
+      if (!adapterName || !input) {
+        return res
+          .status(400)
+          .json({ error: 'adapterName and input are required' });
+      }
+
+      const repoIdNum = parseInt(repositoryIdStr, 10);
+      if (Number.isNaN(repoIdNum)) {
+        return res
+          .status(400)
+          .json({ error: 'repositoryId must be a valid number' });
+      }
+
+      const repo = await prisma.repositories.findUnique({
+        where: { id: repoIdNum },
+        select: { id: true, name: true },
+      });
+
+      if (!repo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      await assertRepositoryLicenseAllowsExecution(repoIdNum);
+
+      const result = await executeAdapter({
+        repositoryId: repoIdNum,
+        adapterName,
+        filePath,
+        input,
+      });
+
+      return res.json({
+        executionId: result.id,
+        status: result.status,
+        duration: result.duration,
+        output: result.output,
+        errorMessage: result.errorMessage,
+      });
+    } catch (error: any) {
+      if (error instanceof LicenseExecutionError) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      logger.error({ error }, 'Failed to execute adapter');
+      return res.status(500).json({ error: 'Failed to execute adapter' });
     }
-
-    // Verify repository exists
-    const repoResult = await pool.query(
-      'SELECT id, name FROM repositories WHERE id = $1',
-      [repositoryId]
-    );
-
-    if (repoResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Repository not found' });
-    }
-
-    // Execute adapter
-    const result = await executeAdapter({
-      repositoryId: parseInt(repositoryId),
-      adapterName,
-      filePath,
-      input
-    });
-
-    res.json({
-      executionId: result.id,
-      status: result.status,
-      duration: result.duration,
-      output: result.output,
-      errorMessage: result.errorMessage
-    });
-
-  } catch (error: any) {
-    logger.error({ error }, 'Failed to execute adapter');
-    res.status(500).json({ error: 'Failed to execute adapter' });
-  }
-});
+  },
+);
 
 // Get execution history for a repository
-router.get('/:repositoryId/executions', authMiddleware, async (req: AuthRequest, res) => {
-  try {
-    const { repositoryId } = req.params;
-    const { adapterName, status, limit = 50 } = req.query;
+router.get(
+  '/:repositoryId/executions',
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const { repositoryId } = req.params;
+      const repositoryIdStr = Array.isArray(repositoryId)
+        ? repositoryId[0]
+        : repositoryId;
+      const { adapterName, status, limit = 50 } = req.query;
 
-    let query = `
-      SELECT id, adapter_name, file_path, status, duration, error_message, executed_at
-      FROM adapter_executions
-      WHERE repository_id = $1
-    `;
-    const params: any[] = [repositoryId];
+      const repoIdNum = parseInt(repositoryIdStr, 10);
+      if (Number.isNaN(repoIdNum)) {
+        return res
+          .status(400)
+          .json({ error: 'repositoryId must be a valid number' });
+      }
 
-    if (adapterName) {
-      params.push(adapterName);
-      query += ` AND adapter_name = $${params.length}`;
+      const take = Math.min(Number(limit) || 50, 200);
+
+      const executions = await prisma.adapter_executions.findMany({
+        where: {
+          repository_id: repoIdNum,
+          ...(adapterName
+            ? { adapter_name: String(adapterName) }
+            : {}),
+          ...(status ? { status: String(status) } : {}),
+        },
+        orderBy: { executed_at: 'desc' },
+        take,
+        select: {
+          id: true,
+          adapter_name: true,
+          file_path: true,
+          status: true,
+          duration: true,
+          error_message: true,
+          executed_at: true,
+          feature_id: true,
+          project_id: true,
+        },
+      });
+
+      return res.json({ executions });
+    } catch (error: any) {
+      logger.error({ error }, 'Failed to fetch executions');
+      return res.status(500).json({ error: 'Failed to fetch executions' });
     }
-
-    if (status) {
-      params.push(status);
-      query += ` AND status = $${params.length}`;
-    }
-
-    params.push(limit);
-    query += ` ORDER BY executed_at DESC LIMIT $${params.length}`;
-
-    const result = await pool.query(query, params);
-
-    res.json({ executions: result.rows });
-
-  } catch (error: any) {
-    logger.error({ error }, 'Failed to fetch executions');
-    res.status(500).json({ error: 'Failed to fetch executions' });
-  }
-});
+  },
+);
 
 // Get single execution details
-router.get('/executions/:executionId', authMiddleware, async (req: AuthRequest, res) => {
-  try {
-    const { executionId } = req.params;
+router.get(
+  '/executions/:executionId',
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const { executionId } = req.params;
+      const executionIdStr = Array.isArray(executionId)
+        ? executionId[0]
+        : executionId;
 
-    const result = await pool.query(
-      'SELECT * FROM adapter_executions WHERE id = $1',
-      [executionId]
-    );
+      const execution = await prisma.adapter_executions.findUnique({
+        where: { id: executionIdStr },
+      });
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Execution not found' });
+      if (!execution) {
+        return res.status(404).json({ error: 'Execution not found' });
+      }
+
+      return res.json({ execution });
+    } catch (error: any) {
+      logger.error({ error }, 'Failed to fetch execution');
+      return res.status(500).json({ error: 'Failed to fetch execution' });
     }
-
-    res.json({ execution: result.rows[0] });
-
-  } catch (error: any) {
-    logger.error({ error }, 'Failed to fetch execution');
-    res.status(500).json({ error: 'Failed to fetch execution' });
-  }
-});
+  },
+);
 
 export default router;

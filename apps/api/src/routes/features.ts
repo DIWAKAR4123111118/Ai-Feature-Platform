@@ -1,12 +1,16 @@
 import { Router } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { prisma } from '../prismaClient';
 import { logger } from '../logger';
 import { fetchGitHubRepoMetadata } from '../services/github';
 import { calculateHealthScore } from '../services/healthScore';
-import { classifyLicense } from '../services/licenseclassifier';
+import { classifyLicense } from '../services/licenseClassifier';
+import {
+  approveFeature,
+  rejectFeature,
+  FeatureApprovalError,
+} from '../services/featureApprovalService';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 // POST /features - Create a feature
 router.post('/', async (req, res) => {
@@ -43,14 +47,9 @@ router.post('/', async (req, res) => {
 });
 
 // GET /features - List all features
-router.get('/', async (req, res) => {
+router.get('/', async (_req, res) => {
   try {
-    const features = await prisma.features.findMany({
-      include: {
-        repositories: true,
-      },
-    });
-
+    const features = await prisma.features.findMany();
     res.json(features);
   } catch (error: any) {
     logger.error({ error }, 'Failed to list features');
@@ -67,7 +66,7 @@ router.post('/:id/repos', async (req, res) => {
     const { id } = req.params;
     const { githubUrl, owner, repo } = req.body;
 
-    if (!githubGithubUrl || !owner || !repo) {
+    if (!githubUrl || !owner || !repo) {
       return res.status(400).json({
         error: 'githubUrl, owner, and repo are required',
       });
@@ -82,7 +81,6 @@ router.post('/:id/repos', async (req, res) => {
       return res.status(404).json({ error: 'Feature not found' });
     }
 
-    // Fetch GitHub metadata
     const metadata = await fetchGitHubRepoMetadata(owner, repo);
 
     let stars: number | null = null;
@@ -97,7 +95,6 @@ router.post('/:id/repos', async (req, res) => {
       archived = metadata.archived;
     }
 
-    // Health score
     let healthScore: number | null = null;
     if (stars !== null || lastCommitAt !== null || licenseSpdx !== null) {
       healthScore = calculateHealthScore({
@@ -108,10 +105,8 @@ router.post('/:id/repos', async (req, res) => {
       });
     }
 
-    // License classification
     const classification = classifyLicense(licenseSpdx);
 
-    // Upsert repository record with license info
     const repoRecord = await prisma.repositories.upsert({
       where: {
         github_url: githubUrl,
@@ -138,7 +133,31 @@ router.post('/:id/repos', async (req, res) => {
       },
     });
 
-    // Link feature -> repository via repo_id
+    await prisma.feature_repositories.upsert({
+      where: {
+        feature_id_repository_id: {
+          feature_id: featureId,
+          repository_id: repoRecord.id,
+        },
+      },
+      update: {
+        licenseRiskTier: classification.tier,
+        licenseAccepted: classification.tier === 'safe',
+        licenseAcceptedBy: classification.tier === 'safe' ? 'system' : null,
+        licenseAcceptedAt: classification.tier === 'safe' ? new Date() : null,
+        licenseText: repoRecord.license_text || null,
+      },
+      create: {
+        feature_id: featureId,
+        repository_id: repoRecord.id,
+        licenseRiskTier: classification.tier,
+        licenseAccepted: classification.tier === 'safe',
+        licenseAcceptedBy: classification.tier === 'safe' ? 'system' : null,
+        licenseAcceptedAt: classification.tier === 'safe' ? new Date() : null,
+        licenseText: repoRecord.license_text || null,
+      },
+    });
+
     const updatedFeature = await prisma.features.update({
       where: { id: featureId },
       data: {
@@ -157,7 +176,7 @@ router.post('/:id/repos', async (req, res) => {
         licenseSpdx,
         tier: classification.tier,
       },
-      'Repo attached to feature with metadata and license classification',
+      'Repo attached to feature with metadata and license classification (no local checkout)',
     );
 
     res.status(201).json({
@@ -190,23 +209,29 @@ router.get('/:featureId/repos/:repoId/license', async (req, res) => {
       return res.status(404).json({ error: 'Feature not found' });
     }
 
-    const repo = await prisma.repositories.findFirst({
+    const fr = await prisma.feature_repositories.findUnique({
       where: {
-        id: Number(repoId),
+        feature_id_repository_id: {
+          feature_id: Number(featureId),
+          repository_id: Number(repoId),
+        },
       },
+      include: { repository: true },
     });
 
-    if (!repo) {
-      return res
-        .status(404)
-        .json({ error: 'Repository not found for this feature' });
+    if (!fr || !fr.repository) {
+      return res.status(404).json({
+        error: 'Repository not attached to this feature',
+      });
     }
 
     return res.json({
-      licenseSpdx: repo.license_spdx,
-      licenseRiskTier: repo.license_risk_tier,
-      licenseText: repo.license_text || null,
-      licenseAccepted: repo.license_accepted || false,
+      licenseSpdx: fr.repository.license_spdx,
+      licenseRiskTier: fr.licenseRiskTier,
+      licenseText: fr.licenseText || fr.repository.license_text || null,
+      licenseAccepted: fr.licenseAccepted,
+      licenseAcceptedBy: fr.licenseAcceptedBy,
+      licenseAcceptedAt: fr.licenseAcceptedAt,
     });
   } catch (error: any) {
     logger.error({ error }, 'Failed to fetch license info');
@@ -230,30 +255,52 @@ router.post('/:featureId/repos/:repoId/accept-license', async (req, res) => {
       return res.status(404).json({ error: 'Feature not found' });
     }
 
-    const repo = await prisma.repositories.findFirst({
+    const fr = await prisma.feature_repositories.findUnique({
       where: {
-        id: Number(repoId),
+        feature_id_repository_id: {
+          feature_id: Number(featureId),
+          repository_id: Number(repoId),
+        },
       },
+      include: { repository: true },
     });
 
-    if (!repo) {
-      return res
-        .status(404)
-        .json({ error: 'Repository not found for this feature' });
+    if (!fr || !fr.repository) {
+      return res.status(404).json({
+        error: 'Repository not attached to this feature',
+      });
     }
 
-    if (repo.license_risk_tier !== 'risky') {
+    const repo = fr.repository;
+
+    if (
+      fr.licenseRiskTier === 'blocked' ||
+      repo.license_risk_tier === 'blocked'
+    ) {
+      return res.status(400).json({
+        error: 'Blocked license cannot be accepted',
+      });
+    }
+
+    const effectiveTier = fr.licenseRiskTier || repo.license_risk_tier;
+
+    if (effectiveTier !== 'risky') {
       return res.status(400).json({
         error: 'License acceptance only required for risky licenses',
       });
     }
 
-    const updatedRepo = await prisma.repositories.update({
-      where: { id: Number(repoId) },
+    const updatedFr = await prisma.feature_repositories.update({
+      where: {
+        feature_id_repository_id: {
+          feature_id: Number(featureId),
+          repository_id: Number(repoId),
+        },
+      },
       data: {
-        license_accepted: true,
-        license_accepted_by: 'system', // TODO: wire to auth user
-        license_accepted_at: new Date(),
+        licenseAccepted: true,
+        licenseAcceptedBy: 'system',
+        licenseAcceptedAt: new Date(),
       },
     });
 
@@ -262,20 +309,79 @@ router.post('/:featureId/repos/:repoId/accept-license', async (req, res) => {
         featureId,
         repositoryId: repo.id,
         licenseSpdx: repo.license_spdx,
-        licenseRiskTier: repo.license_risk_tier,
+        licenseRiskTier: updatedFr.licenseRiskTier,
       },
-      'License accepted for repository',
+      'License accepted for repository for this feature',
     );
 
     return res.json({
       success: true,
       message: 'License accepted',
-      repository: updatedRepo,
+      license: {
+        licenseSpdx: repo.license_spdx,
+        licenseRiskTier: updatedFr.licenseRiskTier,
+        licenseAccepted: updatedFr.licenseAccepted,
+        licenseAcceptedBy: updatedFr.licenseAcceptedBy,
+        licenseAcceptedAt: updatedFr.licenseAcceptedAt,
+      },
     });
   } catch (error: any) {
     logger.error({ error }, 'Failed to accept license');
     res.status(500).json({
       error: 'Failed to accept license',
+      details: error?.message || String(error),
+    });
+  }
+});
+
+// POST /features/:id/approve - Run gates and approve feature
+router.post('/:id/approve', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const featureId = Number(id);
+
+    const approvedBy = 'system';
+
+    const updatedFeature = await approveFeature(featureId, approvedBy);
+
+    return res.json({
+      success: true,
+      message: 'Feature approved',
+      feature: updatedFeature,
+    });
+  } catch (error: any) {
+    if (error instanceof FeatureApprovalError) {
+      return res.status(400).json({ error: error.message });
+    }
+    logger.error({ error }, 'Failed to approve feature');
+    return res.status(500).json({
+      error: 'Failed to approve feature',
+      details: error?.message || String(error),
+    });
+  }
+});
+
+// POST /features/:id/reject - Mark feature as rejected
+router.post('/:id/reject', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const featureId = Number(id);
+    const { reason } = req.body || {};
+
+    const updatedFeature = await rejectFeature(featureId, reason ?? null);
+
+    return res.json({
+      success: true,
+      message: 'Feature rejected',
+      feature: updatedFeature,
+    });
+  } catch (error: any) {
+    if (error instanceof FeatureApprovalError) {
+      return res.status(400).json({ error: error.message });
+    }
+    logger.error({ error }, 'Failed to reject feature');
+    return res.status(500).json({
+      error: 'Failed to reject feature',
       details: error?.message || String(error),
     });
   }

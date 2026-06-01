@@ -1,121 +1,199 @@
-import { Router } from 'express';
-import { pool } from '../db';
+// apps/api/src/routes/analysis.ts
+import { Router, Request, Response } from 'express';
+import { prisma } from '../prismaClient';
 import { logger } from '../logger';
-import { authMiddleware, AuthRequest } from '../middleware/auth';
-import { cloneRepository, cleanupClone, getRepoFiles } from '../services/gitCloner';
+import { authMiddleware } from '../middleware/auth';
+import {
+  cloneRepository,
+  cleanupClone,
+  getRepoFiles,
+} from '../services/gitCloner';
 import { executeAdapter } from '../services/adapterExecutor';
+import {
+  assertRepositoryLicenseAllowsExecution,
+  LicenseExecutionError,
+} from '../services/licenseGuard';
 
 const router = Router();
 
+type EslintOutput = {
+  totalErrors: number;
+  [key: string]: unknown;
+};
+
 // Clone repository and run all adapters
-router.post('/:id/clone-and-analyze', authMiddleware, async (req: AuthRequest, res) => {
-  let cloneDir: string | null = null;
+router.post(
+  '/:id/clone-and-analyze',
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    let cloneDir: string | null = null;
 
-  try {
-    const { id } = req.params;
+    try {
+      const { id } = req.params;
+      const idStr = Array.isArray(id) ? id[0] : id;
 
-    const repoResult = await pool.query(
-      'SELECT github_url, name FROM repositories WHERE id = $1',
-      [id]
-    );
+      const repoIdNum = parseInt(idStr, 10);
+      if (Number.isNaN(repoIdNum)) {
+        return res
+          .status(400)
+          .json({ error: 'Repository id must be a valid number' });
+      }
 
-    if (repoResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Repository not found' });
-    }
-
-    const repo = repoResult.rows[0];
-    logger.info({ repoId: id, repoName: repo.name }, 'Starting clone and analyze');
-
-    cloneDir = await cloneRepository(repo.github_url);
-
-    const files = await getRepoFiles(cloneDir);
-    logger.info({ repoId: id, fileCount: files.length }, 'Found code files');
-
-    const results: any[] = [];
-
-    if (files.length > 0) {
-      const eslintResult = await executeAdapter({
-        repositoryId: parseInt(id),
-        adapterName: 'eslint',
-        input: {
-          repoPath: cloneDir,
-          files: ['.']
-        }
+      const repo = await prisma.repositories.findUnique({
+        where: { id: repoIdNum },
+        select: {
+          id: true,
+          github_url: true,
+          name: true,
+        },
       });
-      results.push({ adapter: 'eslint', ...eslintResult });
 
-      if (eslintResult.status === 'success' && eslintResult.output) {
-        await pool.query(
-          'UPDATE repositories SET quality_score = $1 WHERE id = $2',
-          [100 - (eslintResult.output.totalErrors * 10), parseInt(id)]
-        );
+      if (!repo) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      logger.info(
+        { repoId: repoIdNum, repoName: repo.name },
+        'Starting clone and analyze',
+      );
+
+      await assertRepositoryLicenseAllowsExecution(repoIdNum);
+
+      cloneDir = await cloneRepository(repo.github_url);
+
+      const files = await getRepoFiles(cloneDir);
+      logger.info(
+        { repoId: repoIdNum, fileCount: files.length },
+        'Found code files',
+      );
+
+      const results: any[] = [];
+
+      if (files.length > 0) {
+        const eslintResult = await executeAdapter({
+          repositoryId: repoIdNum,
+          adapterName: 'eslint',
+          input: {
+            repoPath: cloneDir,
+            files: ['.'],
+          },
+        });
+        results.push({ adapter: 'eslint', ...eslintResult });
+
+        if (eslintResult.status === 'success' && eslintResult.output) {
+          const output = eslintResult.output as EslintOutput;
+          const quality = Math.max(
+            0,
+            100 - (Number(output.totalErrors) || 0) * 10,
+          );
+
+          await prisma.repositories.update({
+            where: { id: repoIdNum },
+            data: {
+              quality_score: quality,
+            },
+          });
+        }
+      }
+
+      const analysis = await prisma.repositories.findUnique({
+        where: { id: repoIdNum },
+        select: {
+          quality_score: true,
+          security_score: true,
+        },
+      });
+
+      return res.json({
+        message: 'Analysis complete',
+        repository: {
+          id: repoIdNum,
+          name: repo.name,
+          fileCount: files.length,
+        },
+        results,
+        scores: analysis,
+      });
+    } catch (error: any) {
+      if (error instanceof LicenseExecutionError) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      logger.error({ error, repoId: req.params.id }, 'Clone and analyze failed');
+      return res
+        .status(500)
+        .json({ error: error.message || 'Failed to clone and analyze' });
+    } finally {
+      if (cloneDir) {
+        await cleanupClone(cloneDir);
       }
     }
-
-    const analysisResult = await pool.query(
-      `SELECT quality_score, security_score FROM repositories WHERE id = $1`,
-      [id]
-    );
-
-    res.json({
-      message: 'Analysis complete',
-      repository: {
-        id: parseInt(id),
-        name: repo.name,
-        fileCount: files.length
-      },
-      results,
-      scores: analysisResult.rows[0]
-    });
-
-  } catch (error: any) {
-    logger.error({ error, repoId: req.params.id }, 'Clone and analyze failed');
-    res.status(500).json({ error: error.message || 'Failed to clone and analyze' });
-  } finally {
-    if (cloneDir) {
-      await cleanupClone(cloneDir);
-    }
-  }
-});
+  },
+);
 
 // Get repository analysis summary
-router.get('/:id/analysis', authMiddleware, async (req: AuthRequest, res) => {
-  try {
-    const { id } = req.params;
+router.get(
+  '/:id/analysis',
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const idStr = Array.isArray(id) ? id[0] : id;
 
-    const repoResult = await pool.query(
-      `SELECT r.id, r.name, r.github_url, r.stars, r.quality_score, r.security_score,
-              r.license_spdx, r.license_risk_tier, r.created_at,
-              COUNT(ae.id) as execution_count
-       FROM repositories r
-       LEFT JOIN adapter_executions ae ON r.id = ae.repository_id
-       WHERE r.id = $1
-       GROUP BY r.id`,
-      [id]
-    );
+      const repoIdNum = parseInt(idStr, 10);
+      if (Number.isNaN(repoIdNum)) {
+        return res
+          .status(400)
+          .json({ error: 'Repository id must be a valid number' });
+      }
 
-    if (repoResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Repository not found' });
+      const repository = await prisma.repositories.findUnique({
+        where: { id: repoIdNum },
+        select: {
+          id: true,
+          name: true,
+          github_url: true,
+          stars: true,
+          quality_score: true,
+          security_score: true,
+          license_spdx: true,
+          license_risk_tier: true,
+          created_at: true,
+        },
+      });
+
+      if (!repository) {
+        return res.status(404).json({ error: 'Repository not found' });
+      }
+
+      const executionCount = await prisma.adapter_executions.count({
+        where: { repository_id: repoIdNum },
+      });
+
+      const recentExecutions = await prisma.adapter_executions.findMany({
+        where: { repository_id: repoIdNum },
+        orderBy: { executed_at: 'desc' },
+        take: 10,
+        select: {
+          adapter_name: true,
+          status: true,
+          duration: true,
+          executed_at: true,
+        },
+      });
+
+      return res.json({
+        repository: {
+          ...repository,
+          execution_count: executionCount,
+        },
+        recentExecutions,
+      });
+    } catch (error: any) {
+      logger.error({ error }, 'Failed to fetch analysis');
+      return res.status(500).json({ error: 'Failed to fetch analysis' });
     }
-
-    const recentExecutions = await pool.query(
-      `SELECT adapter_name, status, duration, executed_at 
-       FROM adapter_executions 
-       WHERE repository_id = $1 
-       ORDER BY executed_at DESC 
-       LIMIT 10`,
-      [id]
-    );
-
-    res.json({
-      repository: repoResult.rows[0],
-      recentExecutions: recentExecutions.rows
-    });
-
-  } catch (error: any) {
-    logger.error({ error }, 'Failed to fetch analysis');
-    res.status(500).json({ error: 'Failed to fetch analysis' });
-  }
-});
+  },
+);
 
 export default router;

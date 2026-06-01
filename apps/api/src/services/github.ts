@@ -4,9 +4,10 @@ interface GitHubRepoData {
   full_name: string;
   html_url: string;
   stargazers_count: number;
-  license: { spdx_id: string } | null;
+  license: { spdx_id: string | null } | null;
   pushed_at: string;
   archived: boolean;
+  description: string | null;
 }
 
 export async function fetchGitHubRepoMetadata(
@@ -24,7 +25,10 @@ export async function fetchGitHubRepoMetadata(
     });
 
     if (!response.ok) {
-      logger.warn({ owner, repo, status: response.status }, 'GitHub API request failed');
+      logger.warn(
+        { owner, repo, status: response.status },
+        'GitHub API request failed',
+      );
       return null;
     }
 

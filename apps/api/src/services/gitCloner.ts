@@ -10,7 +10,7 @@ export async function cloneRepository(githubUrl: string): Promise<string> {
   const tempDir = path.join(process.cwd(), 'temp-clones');
   await fs.mkdir(tempDir, { recursive: true });
 
-  const urlMatch = githubUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+  const urlMatch = githubUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
   if (!urlMatch) {
     throw new Error('Invalid GitHub URL format');
   }
@@ -20,9 +20,7 @@ export async function cloneRepository(githubUrl: string): Promise<string> {
 
   try {
     await fs.rm(cloneDir, { recursive: true, force: true });
-  } catch (err) {
-    // Ignore if directory doesn't exist
-  }
+  } catch {}
 
   logger.info({ githubUrl, cloneDir }, 'Cloning repository');
 
@@ -45,7 +43,11 @@ export async function cleanupClone(cloneDir: string): Promise<void> {
   }
 }
 
-export async function getRepoFiles(dir: string, maxDepth = 3, currentDepth = 0): Promise<string[]> {
+export async function getRepoFiles(
+  dir: string,
+  maxDepth = 3,
+  currentDepth = 0,
+): Promise<string[]> {
   if (currentDepth > maxDepth) return [];
 
   const files: string[] = [];
@@ -54,7 +56,18 @@ export async function getRepoFiles(dir: string, maxDepth = 3, currentDepth = 0):
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
 
-    if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist' || entry.name === 'build') {
+    if (
+      entry.name === 'node_modules' ||
+      entry.name === '.git' ||
+      entry.name === 'dist' ||
+      entry.name === 'build' ||
+      entry.name === 'coverage' ||
+      entry.name === '.turbo' ||
+      entry.name === '.next' ||
+      entry.name === 'test' ||
+      entry.name === 'tests' ||
+      entry.name === '__tests__'
+    ) {
       continue;
     }
 
@@ -71,5 +84,5 @@ export async function getRepoFiles(dir: string, maxDepth = 3, currentDepth = 0):
 
 function isCodeFile(filename: string): boolean {
   const codeExtensions = ['.js', '.ts', '.jsx', '.tsx', '.mjs', '.cjs', '.json'];
-  return codeExtensions.some(ext => filename.endsWith(ext));
+  return codeExtensions.some((ext) => filename.endsWith(ext));
 }
