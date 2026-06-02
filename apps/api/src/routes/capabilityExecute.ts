@@ -1,26 +1,32 @@
 // apps/api/src/routes/capabilityExecute.ts
 import { Router } from 'express';
 import { prisma } from '../prismaClient';
-import { apiKeyAuth, ApiKeyRequest } from '../middleware/apiKeyAuth';
+import { apiKeyAuth } from '../middleware/apiKeyAuth';
 import { capabilityRateLimiter } from '../middleware/rateLimit';
 import { requireFeatureApproved } from '../middleware/requireFeatureApproved';
 import {
   assertFeatureRepositoryLicenseAllowsExecution,
   LicenseExecutionError,
 } from '../services/licenseGuard';
-import { adapterQueue } from '../queue/adapterQueue';
+import { enqueueAdapterJob } from '../services/adapterJobQueue';
 
+/**
+ * Legacy / internal capability executor:
+ * POST /internal/capabilities/:featureId/execute
+ * - Uses featureId instead of slug
+ * - Goes through enqueueAdapterJob (adapter_executions + queue)
+ */
 const router = Router();
 
-// POST /capabilities/:featureId/execute
 router.post(
   '/capabilities/:featureId/execute',
   apiKeyAuth,
   capabilityRateLimiter,
   requireFeatureApproved('ESLint'),
   async (req, res) => {
+    console.log('CAPABILITY_ROUTE_HIT', req.method, req.path);
+
     try {
-      const apiReq = req as ApiKeyRequest;
       const { featureId } = req.params;
       const featureIdNum = Number(featureId);
 
@@ -28,8 +34,10 @@ router.post(
         return res.status(400).json({ error: 'Invalid featureId' });
       }
 
-      if (!apiReq.projectId) {
-        return res.status(400).json({ error: 'No project bound to API key' });
+      if (!req.projectId) {
+        return res
+          .status(400)
+          .json({ error: 'No project bound to API key' });
       }
 
       const feature = await prisma.features.findUnique({
@@ -37,35 +45,39 @@ router.post(
         include: { repositories: true },
       });
 
-      if (!feature || !feature.repo_id || !feature.repositories) {
+      if (!feature) {
+        return res.status(404).json({ error: 'Feature not found' });
+      }
+
+      if (!feature.repo_id || !feature.repositories) {
         return res
           .status(404)
-          .json({ error: 'Feature or repository not found' });
+          .json({ error: 'Feature repository not found' });
       }
 
       const repositoryId = feature.repo_id;
 
-      // license + project-level acceptance check
       await assertFeatureRepositoryLicenseAllowsExecution(
         featureIdNum,
         repositoryId,
-        apiReq.projectId,
+        req.projectId,
       );
 
       const adapterName = 'eslint';
-      const { input } = req.body;
+      const { input } = req.body ?? {};
 
-      const job = await adapterQueue.add('execute-adapter', {
+      const job = await enqueueAdapterJob({
+        adapterName,
         repositoryId,
         featureId: featureIdNum,
-        projectId: apiReq.projectId,
-        adapterName,
-        filePath: null,
+        projectId: req.projectId,
+        tenantId: req.tenantId ?? null,
         input,
       });
 
       return res.json({
-        jobId: job.id,
+        executionId: job.executionId,
+        jobId: job.jobId,
         status: 'queued',
       });
     } catch (error: any) {

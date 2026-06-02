@@ -1,16 +1,19 @@
+// apps/api/src/services/adapterExecutor.ts
 import fetch from 'node-fetch';
 import { prisma } from '../prismaClient';
 import { logger } from '../logger';
 
-interface ExecuteAdapterParams {
+export interface ExecuteAdapterParams {
+  executionId: string;
   repositoryId: number;
-  featureId?: number | null;
+  featureId: number;
+  projectId: number | null;
   adapterName: string;
   filePath?: string | null;
   input: any;
 }
 
-interface AdapterExecutionResult {
+export interface AdapterExecutionResult {
   id: string;
   status: string;
   duration: number;
@@ -29,8 +32,10 @@ export async function executeAdapter(
   params: ExecuteAdapterParams,
 ): Promise<AdapterExecutionResult> {
   const {
+    executionId,
     repositoryId,
-    featureId = null,
+    featureId,
+    projectId,
     adapterName,
     filePath = null,
     input,
@@ -42,21 +47,6 @@ export async function executeAdapter(
 
   const startedAt = Date.now();
 
-  const execution = await prisma.adapter_executions.create({
-    data: {
-      repository_id: repositoryId,
-      feature_id: featureId,
-      adapter_name: adapterName,
-      file_path: filePath,
-      input,
-      output: {},
-      status: 'pending',
-      duration: 0,
-      error_message: null,
-      lint_errors: 0,
-    },
-  });
-
   let status: string = 'error';
   let output: any = null;
   let errorMessage: string | null = null;
@@ -66,14 +56,17 @@ export async function executeAdapter(
     const baseUrl = process.env.API_BASE_URL ?? 'http://localhost:3000';
     const token = process.env.INTERNAL_SERVICE_JWT;
 
-    const response = await fetch(`${baseUrl}/internal/features/eslint/run`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    const response = await fetch(
+      `${baseUrl}/internal/features/${featureId}/run`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ input }),
       },
-      body: JSON.stringify({ input }),
-    });
+    );
 
     const duration = Date.now() - startedAt;
 
@@ -83,7 +76,7 @@ export async function executeAdapter(
       errorMessage = `ESLint adapter failed: ${response.status} ${text}`;
 
       await prisma.adapter_executions.update({
-        where: { id: execution.id },
+        where: { id: executionId },
         data: {
           status,
           duration,
@@ -95,9 +88,10 @@ export async function executeAdapter(
 
       logger.error(
         {
-          executionId: execution.id,
+          executionId,
           repositoryId,
           featureId,
+          projectId,
           adapterName,
           status,
           duration,
@@ -116,7 +110,7 @@ export async function executeAdapter(
       typeof resultJson.errorCount === 'number' ? resultJson.errorCount : 0;
 
     await prisma.adapter_executions.update({
-      where: { id: execution.id },
+      where: { id: executionId },
       data: {
         status,
         duration,
@@ -128,9 +122,10 @@ export async function executeAdapter(
 
     logger.info(
       {
-        executionId: execution.id,
+        executionId,
         repositoryId,
         featureId,
+        projectId,
         adapterName,
         status,
         duration,
@@ -140,7 +135,7 @@ export async function executeAdapter(
     );
 
     return {
-      id: execution.id,
+      id: executionId,
       status,
       duration,
       output,
@@ -150,7 +145,7 @@ export async function executeAdapter(
     const duration = Date.now() - startedAt;
 
     await prisma.adapter_executions.update({
-      where: { id: execution.id },
+      where: { id: executionId },
       data: {
         status: 'error',
         duration,
@@ -160,9 +155,10 @@ export async function executeAdapter(
 
     logger.error(
       {
-        executionId: execution.id,
+        executionId,
         repositoryId,
         featureId,
+        projectId,
         adapterName,
         error: err?.message || String(err),
         duration,

@@ -2,19 +2,12 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { logger } from '../logger';
+import { JwtPayload } from '../auth/jwt';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret';
 
-export interface AuthUserPayload {
-  userId: number;
-  email: string;
-  tenantId: number;
-  projectId: number | null;
-  iat: number;
-  exp: number;
-}
+export interface AuthUserPayload extends JwtPayload {}
 
-// Narrowed request type you can cast to in handlers when you need user
 export interface AuthRequest extends Request {
   user: AuthUserPayload;
 }
@@ -25,7 +18,8 @@ declare module 'express-serve-static-core' {
   }
 }
 
-export function authMiddleware(
+// Exported as `auth` to match main.ts import
+export function auth(
   req: Request,
   res: Response,
   next: NextFunction,
@@ -39,7 +33,7 @@ export function authMiddleware(
   const token = header.slice('Bearer '.length).trim();
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AuthUserPayload;
+    const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
     req.user = decoded;
     return next();
   } catch (err: any) {

@@ -1,3 +1,5 @@
+import { getAuthToken } from './auth';
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:3000';
 
@@ -17,6 +19,8 @@ export interface Repository {
   security_score: number | null;
   quality_score: number | null;
   status: string;
+  eslint_status?: string | null;
+  eslint_errors_count?: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -45,8 +49,28 @@ export interface AttachRepoPayload {
   repo: string;
 }
 
+async function authedFetch(
+  input: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const token = await getAuthToken();
+
+  const headers: HeadersInit = {
+    ...(init.headers || {}),
+    Authorization: `Bearer ${token}`,
+  };
+
+  return fetch(input, {
+    ...init,
+    headers,
+  });
+}
+
+/**
+ * Fetch all features, including attached repository and its ESLint status.
+ */
 export async function getFeatures(): Promise<Feature[]> {
-  const res = await fetch(`${API_BASE_URL}/features`, {
+  const res = await authedFetch(`${API_BASE_URL}/features`, {
     cache: 'no-store',
   });
 
@@ -54,13 +78,22 @@ export async function getFeatures(): Promise<Feature[]> {
     throw new Error(`Failed to fetch features: ${res.status}`);
   }
 
-  return res.json();
+  const data = await res.json();
+
+  if (Array.isArray(data)) {
+    return data as Feature[];
+  }
+  if (Array.isArray((data as any).features)) {
+    return (data as any).features as Feature[];
+  }
+
+  throw new Error('Unexpected features response shape');
 }
 
 export async function createFeature(
   payload: CreateFeaturePayload,
 ): Promise<Feature> {
-  const res = await fetch(`${API_BASE_URL}/features`, {
+  const res = await authedFetch(`${API_BASE_URL}/features`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -87,19 +120,112 @@ export async function attachRepositoryToFeature(
     reason: string;
   };
 }> {
-  const res = await fetch(`${API_BASE_URL}/features/${featureId}/repos`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
+  const res = await authedFetch(
+    `${API_BASE_URL}/features/${featureId}/repos`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload),
-  });
+  );
 
   if (!res.ok) {
     const text = await res.text();
     throw new Error(
       `Failed to attach repository: ${res.status} ${text}`,
     );
+  }
+
+  return res.json();
+}
+
+/**
+ * Run ESLint scan for a repository.
+ * Backend: POST /repositories/:id/eslint-scan
+ */
+export async function runEslintScan(
+  repositoryId: number,
+): Promise<{
+  repositoryId: string;
+  eslintStatus: string;
+  eslintErrorsCount?: number;
+  adapterExecutionId?: string;
+}> {
+  const res = await authedFetch(
+    `${API_BASE_URL}/repositories/${repositoryId}/eslint-scan`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    },
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to run ESLint scan: ${res.status} ${text}`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Approve a feature.
+ * Backend: POST /features/:id/approve
+ */
+export async function approveFeature(
+  featureId: number,
+): Promise<{
+  success: boolean;
+  message: string;
+  feature: Feature;
+}> {
+  const res = await authedFetch(
+    `${API_BASE_URL}/features/${featureId}/approve`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    },
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to approve feature: ${res.status} ${text}`);
+  }
+
+  return res.json();
+}
+
+/**
+ * Run an internal feature by ID.
+ * Backend: POST /internal/features/:id/run
+ */
+export async function runInternalFeature(
+  featureId: number,
+  input: unknown,
+): Promise<{
+  status: string;
+  output: unknown;
+  executionId?: string;
+}> {
+  const res = await authedFetch(
+    `${API_BASE_URL}/internal/features/${featureId}/run`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ input }),
+    },
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to run feature: ${res.status} ${text}`);
   }
 
   return res.json();

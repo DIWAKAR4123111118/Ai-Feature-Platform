@@ -41,14 +41,43 @@ export async function assertRepositoryLicenseAllowsExecution(
 }
 
 /**
- * Feature+repo-scoped guard for internal feature runs.
- * Optional projectId allows future per-project acceptance checks.
+ * Feature+repo-scoped guard for internal and project-scoped runs.
+ * If projectId is provided, consult project_repo_licenses for per-project acceptance.
+ *
+ * Rules:
+ * - Feature must be attached to the repository (via features.repo_id).
+ * - Blocked / unclassified licenses are always blocked.
+ * - Risky licenses require explicit acceptance:
+ *   - via feature_repositories.licenseAccepted, or
+ *   - via repositories.license_accepted, or
+ *   - via project_repo_licenses.accepted for the given project.
  */
 export async function assertFeatureRepositoryLicenseAllowsExecution(
   featureId: number,
   repositoryId: number,
   projectId?: number | null,
 ) {
+  // 1) Load feature and its repository relationship
+  const feature = await prisma.features.findUnique({
+    where: { id: featureId },
+    include: { repositories: true },
+  });
+
+  if (!feature || !feature.repositories) {
+    throw new LicenseExecutionError(
+      'Feature is not attached to any repository or repository not found',
+    );
+  }
+
+  const repo = feature.repositories;
+
+  if (repo.id !== repositoryId) {
+    throw new LicenseExecutionError(
+      'Feature is not attached to this repository or repository mismatch',
+    );
+  }
+
+  // 2) Optionally load feature_repositories row
   const fr = await prisma.feature_repositories.findUnique({
     where: {
       feature_id_repository_id: {
@@ -56,19 +85,13 @@ export async function assertFeatureRepositoryLicenseAllowsExecution(
         repository_id: repositoryId,
       },
     },
-    include: { repository: true },
-  });
+  }).catch(() => null);
 
-  if (!fr || !fr.repository) {
-    throw new LicenseExecutionError(
-      'Feature is not attached to this repository or repository not found',
-    );
-  }
+  // Prefer feature-level risk tier if present, otherwise repo-level
+  const riskTier = fr?.licenseRiskTier || repo.license_risk_tier;
+  let accepted = fr?.licenseAccepted ?? repo.license_accepted ?? false;
 
-  const repo = fr.repository;
-  const riskTier = fr.licenseRiskTier || repo.license_risk_tier;
-  let accepted = fr.licenseAccepted ?? repo.license_accepted;
-
+  // 3) Project-specific acceptance override for risky licenses
   if (projectId && isLicenseRisky(riskTier)) {
     const prl = await prisma.project_repo_licenses.findUnique({
       where: {
@@ -77,22 +100,26 @@ export async function assertFeatureRepositoryLicenseAllowsExecution(
           repository_id: repositoryId,
         },
       },
-    });
+    }).catch(() => null);
 
     if (prl && prl.accepted) {
       accepted = true;
     }
   }
 
+  // 4) Blocked or unknown tier => hard block
   if (isLicenseBlocked(riskTier)) {
     throw new LicenseExecutionError(
       'Execution blocked due to license policy (blocked or unknown tier) for this feature',
     );
   }
 
+  // 5) Risky and not accepted => block
   if (isLicenseRisky(riskTier) && !accepted) {
     throw new LicenseExecutionError(
       'Execution blocked: risky license must be explicitly accepted before running this feature',
     );
   }
+
+  // For safe/low tiers and accepted=false, allow execution.
 }

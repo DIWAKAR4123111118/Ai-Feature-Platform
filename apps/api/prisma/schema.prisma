@@ -1,0 +1,227 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model features {
+  id          Int       @id @default(autoincrement())
+  repo_id     Int?
+  name        String    @db.VarChar(255)
+  version     String?   @db.VarChar(50)
+  description String?
+  status      String?   @default("discovered") @db.VarChar(50)
+  approved    Boolean?  @default(false)
+  created_at  DateTime? @default(now()) @db.Timestamp(6)
+  updated_at  DateTime? @default(now()) @db.Timestamp(6)
+
+  // relations
+  repositories         repositories?          @relation(fields: [repo_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  adapter_executions   adapter_executions[]
+  feature_repositories feature_repositories[]
+  project_features     project_features[]
+  capabilities         capabilities[]         // back-relation
+
+  @@index([approved], map: "idx_features_approved")
+}
+
+model repositories {
+  id          Int     @id @default(autoincrement())
+  github_url  String  @unique @db.VarChar(500)
+  name        String  @db.VarChar(255)
+  description String?
+  stars       Int?    @default(0)
+  language    String? @db.VarChar(100)
+
+  // license & compliance
+  license_spdx        String?   @db.VarChar(100)
+  license_text        String?
+  license_risk_tier   String    @default("unknown") @db.VarChar(50)
+  license_accepted    Boolean?  @default(false)
+  license_accepted_by String?   @db.VarChar(255)
+  license_accepted_at DateTime? @db.Timestamp(6)
+
+  // quality / security
+  security_score      Int?
+  quality_score       Int?
+  eslint_errors_count Int?    @default(0)
+  eslint_status       String? @db.VarChar(50)
+
+  // lifecycle
+  status     String?   @default("pending") @db.VarChar(50)
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+  updated_at DateTime? @default(now()) @db.Timestamp(6)
+
+  // relations
+  features              features[]
+  security_scans        security_scans[]
+  adapter_executions    adapter_executions[]
+  feature_repositories  feature_repositories[]
+  project_repo_licenses project_repo_licenses[]
+  capabilities          capabilities[]         // back-relation
+
+  @@index([status], map: "idx_repos_status")
+}
+
+model security_scans {
+  id                    Int       @id @default(autoincrement())
+  repo_id               Int?
+  scan_type             String    @db.VarChar(100)
+  result                Json?
+  vulnerabilities_count Int?      @default(0)
+  passed                Boolean?  @default(false)
+  scanned_at            DateTime? @default(now()) @db.Timestamp(6)
+
+  repositories repositories? @relation(fields: [repo_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tenants {
+  id         Int       @id @default(autoincrement())
+  name       String    @db.VarChar(255)
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+  updated_at DateTime? @default(now()) @db.Timestamp(6)
+
+  users    users[]
+  projects projects[]
+}
+
+model projects {
+  id         Int       @id @default(autoincrement())
+  tenant_id  Int
+  name       String    @db.VarChar(255)
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+  updated_at DateTime? @default(now()) @db.Timestamp(6)
+
+  tenant                tenants                 @relation(fields: [tenant_id], references: [id], onDelete: Cascade)
+  project_features      project_features[]
+  adapter_executions    adapter_executions[]
+  project_repo_licenses project_repo_licenses[]
+  project_api_keys      project_api_keys[]
+}
+
+model users {
+  id              Int       @id @default(autoincrement())
+  email           String    @unique @db.VarChar(255)
+  password_hash   String    @db.VarChar(255)
+  github_username String?   @db.VarChar(255)
+  tenant_id       Int?
+  created_at      DateTime? @default(now()) @db.Timestamp(6)
+  updated_at      DateTime? @default(now()) @db.Timestamp(6)
+
+  tenant tenants? @relation(fields: [tenant_id], references: [id])
+
+  @@index([email], map: "idx_users_email")
+}
+
+model adapter_executions {
+  id            String   @id @default(uuid())
+  repository_id Int?
+  feature_id    Int?
+  project_id    Int?
+  adapter_name  String   @db.VarChar(100)
+  file_path     String?  @db.VarChar(500)
+  input         Json
+  output        Json?
+  status        String   @db.VarChar(50)
+  duration      Int?
+  error_message String?
+  executed_at   DateTime @default(now()) @db.Timestamp(6)
+  lint_errors   Int?     @default(0)
+
+  feature    features?     @relation(fields: [feature_id], references: [id], onDelete: Cascade)
+  repository repositories? @relation(fields: [repository_id], references: [id], onDelete: Cascade)
+  project    projects?     @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@index([adapter_name])
+  @@index([repository_id])
+  @@index([feature_id])
+  @@index([status])
+}
+
+model feature_repositories {
+  id            Int @id @default(autoincrement())
+  feature_id    Int
+  repository_id Int
+
+  licenseRiskTier   String    @default("unknown") @db.VarChar(50)
+  licenseAccepted   Boolean   @default(false)
+  licenseAcceptedBy String?   @db.VarChar(255)
+  licenseAcceptedAt DateTime? @db.Timestamp(6)
+  licenseText       String?
+
+  feature    features     @relation(fields: [feature_id], references: [id], onDelete: Cascade)
+  repository repositories @relation(fields: [repository_id], references: [id], onDelete: Cascade)
+
+  @@unique([feature_id, repository_id])
+  @@index([feature_id])
+  @@index([repository_id])
+}
+
+model project_features {
+  id         Int       @id @default(autoincrement())
+  project_id Int
+  feature_id Int
+  enabled    Boolean   @default(true)
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+
+  project projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  feature features @relation(fields: [feature_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, feature_id], map: "uniq_project_feature")
+}
+
+model project_repo_licenses {
+  id            Int       @id @default(autoincrement())
+  project_id    Int
+  repository_id Int
+  license_tier  String    @db.VarChar(50)
+  accepted      Boolean   @default(false)
+  accepted_by   String?   @db.VarChar(255)
+  accepted_at   DateTime? @db.Timestamp(6)
+
+  project    projects     @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  repository repositories @relation(fields: [repository_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, repository_id], map: "uniq_project_repo_license")
+}
+
+model project_api_keys {
+  id         Int       @id @default(autoincrement())
+  project_id Int
+  key        String    @unique @db.VarChar(255) // store hash or raw (we’ll move to hash shortly)
+  name       String    @db.VarChar(255)
+  active     Boolean   @default(true)
+  created_at DateTime? @default(now()) @db.Timestamp(6)
+
+  project projects @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@index([project_id])
+}
+
+model capabilities {
+  id               Int       @id @default(autoincrement())
+  feature_id       Int
+  repository_id    Int
+  name             String    @db.VarChar(255)
+  slug             String    @unique @db.VarChar(255)
+  description      String
+  license_tier     String    @db.VarChar(50) // safe | risky | blocked | unclassified
+  security_summary String?   @db.VarChar(1000)
+  quality_summary  String?   @db.VarChar(1000)
+  status           String    @default("beta") @db.VarChar(50)    // beta | ga | deprecated
+  visibility       String    @default("public") @db.VarChar(50)  // public | restricted | private
+  adapter_name     String    @db.VarChar(100)
+  created_at       DateTime? @default(now()) @db.Timestamp(6)
+  updated_at       DateTime? @default(now()) @db.Timestamp(6)
+
+  feature    features     @relation(fields: [feature_id], references: [id], onDelete: Cascade)
+  repository repositories @relation(fields: [repository_id], references: [id], onDelete: Cascade)
+
+  @@index([slug])
+  @@index([status])
+  @@index([adapter_name])
+  @@index([visibility])
+}

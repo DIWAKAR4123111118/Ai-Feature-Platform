@@ -2,10 +2,21 @@
 import { Request, Response, NextFunction } from 'express';
 import { prisma } from '../prismaClient';
 
-export interface ApiKeyRequest extends Request {
-  projectId?: number;
+declare module 'express-serve-static-core' {
+  interface Request {
+    projectId?: number;
+    tenantId?: number;
+  }
 }
 
+/**
+ * API key authentication middleware.
+ *
+ * - Reads the key from x-api-key header.
+ * - Validates it against project_api_keys.
+ * - Ensures it is active and bound to a project.
+ * - Attaches projectId and tenantId to the request.
+ */
 export async function apiKeyAuth(
   req: Request,
   res: Response,
@@ -26,8 +37,12 @@ export async function apiKeyAuth(
       return res.status(401).json({ error: 'Invalid or inactive API key' });
     }
 
-    const apiReq = req as ApiKeyRequest;
-    apiReq.projectId = keyRecord.project_id;
+    if (!keyRecord.project_id) {
+      return res.status(401).json({ error: 'API key not bound to a project' });
+    }
+
+    req.projectId = keyRecord.project_id;
+    req.tenantId = keyRecord.project?.tenant_id ?? undefined;
 
     return next();
   } catch (err: any) {

@@ -1,30 +1,49 @@
-// middleware/requireFeatureApproved.ts
+// apps/api/src/middleware/requireFeatureApproved.ts
 import { Request, Response, NextFunction } from 'express';
 import { pool } from '../db';
 import { logger } from '../logger';
 
-export function requireFeatureApproved(featureName: string) {
+/**
+ * Global feature/repository health gate.
+ *
+ * Ensures for the given featureId:
+ * - Feature exists.
+ * - Feature is approved (status + approved flag).
+ * - Repository license_risk_tier is not blocked.
+ * - Repository ESLint status is pass.
+ * - Latest security scan (if exists) passed.
+ *
+ * Does NOT enforce per-project license acceptance; that is handled by licenseGuard.
+ */
+export function requireFeatureApproved(_capabilityName: string) {
   return async function (req: Request, res: Response, next: NextFunction) {
     try {
-      // Look up feature by name and join repo
+      const { featureId } = req.params;
+      const featureIdNum = Number(featureId);
+
+      if (Number.isNaN(featureIdNum) || featureIdNum <= 0) {
+        return res.status(400).json({ error: 'Invalid featureId' });
+      }
+
       const result = await pool.query(
         `
           SELECT
-            f.id as feature_id,
-            f.name as feature_name,
-            f.status as feature_status,
-            f.repo_id as feature_repo_id,
-            r.id as repo_id,
+            f.id             AS feature_id,
+            f.name           AS feature_name,
+            f.status         AS feature_status,
+            f.approved       AS feature_approved,
+            f.repo_id        AS feature_repo_id,
+            r.id             AS repo_id,
             r.license_risk_tier,
             r.license_accepted,
             r.eslint_status,
             r.eslint_errors_count
           FROM features f
           JOIN repositories r ON f.repo_id = r.id
-          WHERE f.name = $1
+          WHERE f.id = $1
           LIMIT 1
         `,
-        [featureName],
+        [featureIdNum],
       );
 
       if (result.rows.length === 0) {
@@ -34,16 +53,13 @@ export function requireFeatureApproved(featureName: string) {
       const row = result.rows[0];
 
       // Feature status gate
-      if (row.feature_status !== 'approved') {
+      if (row.feature_status !== 'approved' || row.feature_approved !== true) {
         return res.status(403).json({ error: 'Feature not approved' });
       }
 
-      // License gate
+      // Global license risk gate (no per-project acceptance here)
       if (row.license_risk_tier === 'blocked') {
         return res.status(403).json({ error: 'Blocked license' });
-      }
-      if (row.license_risk_tier === 'risky' && !row.license_accepted) {
-        return res.status(403).json({ error: 'Risky license not accepted' });
       }
 
       // ESLint quality gate
@@ -51,13 +67,13 @@ export function requireFeatureApproved(featureName: string) {
         return res.status(403).json({ error: 'ESLint status not pass' });
       }
 
-      // OSV/security gate: fetch latest scan
+      // OSV/security gate: fetch latest scan by repo_id
       const scanResult = await pool.query(
         `
           SELECT passed
           FROM security_scans
-          WHERE repository_id = $1
-          ORDER BY created_at DESC
+          WHERE repo_id = $1
+          ORDER BY scanned_at DESC
           LIMIT 1
         `,
         [row.repo_id],
@@ -75,7 +91,7 @@ export function requireFeatureApproved(featureName: string) {
           .json({ error: 'Latest security scan did not pass' });
       }
 
-      // Attach to req for downstream usage
+      // Attach to req for downstream usage / logging
       (req as any).feature = {
         id: row.feature_id,
         name: row.feature_name,
@@ -91,9 +107,15 @@ export function requireFeatureApproved(featureName: string) {
       };
 
       return next();
-    } catch (error) {
-      logger.error({ error }, 'requireFeatureApproved failed');
-      return res.status(500).json({ error: 'Feature approval check failed' });
+    } catch (error: any) {
+      logger.error(
+        { error: error?.message || String(error) },
+        'requireFeatureApproved failed',
+      );
+      return res.status(500).json({
+        error: 'Feature approval check failed',
+        details: error?.message || String(error),
+      });
     }
   };
 }

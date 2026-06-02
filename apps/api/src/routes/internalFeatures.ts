@@ -1,8 +1,8 @@
 // apps/api/src/routes/internalFeatures.ts
 import { Router } from 'express';
-import { authMiddleware } from '../middleware/auth';
-import { logger } from '../logger';
-import { requireFeatureApproved } from '../middleware/requireFeatureApproved';
+// import { authMiddleware } from '../middleware/auth';
+// import { logger } from '../logger';
+// import { requireFeatureApproved } from '../middleware/requireFeatureApproved';
 // import { runContextualPromptAdapter } from '../adapters/contextualPromptingAdapter';
 
 const router = Router();

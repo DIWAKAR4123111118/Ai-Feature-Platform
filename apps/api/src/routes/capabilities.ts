@@ -8,19 +8,21 @@ const router = Router();
 
 /**
  * GET /capabilities
- * List all approved, license-safe, ESLint-passing capabilities,
- * optionally filtered to those enabled for the current project.
+ * List approved, license- and quality-safe capabilities.
+ * If projectId present, restrict to features enabled for that project and
+ * risky licenses accepted for that project via project_repo_licenses.
  */
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const authReq = req as AuthRequest;
 
-    // projectId is not typed yet on AuthUserPayload; treat as optional bag
-    const rawProjectId = (authReq.user as any)?.projectId;
+    const rawProjectId = authReq.user?.projectId;
     const projectId =
       rawProjectId != null && !Number.isNaN(Number(rawProjectId))
         ? Number(rawProjectId)
         : null;
+
+    const params: any[] = [];
 
     let query = `
       SELECT
@@ -30,41 +32,54 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
         f.status AS feature_status,
         f.approved AS feature_approved,
         r.id AS repository_id,
-        r.githuburl AS repository_github_url,
+        r.github_url AS repository_github_url,
         r.name AS repository_name,
-        r.licenserisktier AS license_risk_tier,
-        r.licenseaccepted AS license_accepted,
-        r.eslintstatus AS eslint_status,
-        r.eslinterrorscount AS eslint_errors_count,
-        r.securityscore AS security_score,
-        r.qualityscore AS quality_score
+        r.license_risk_tier AS license_risk_tier,
+        r.license_accepted AS license_accepted_global,
+        r.eslint_status AS eslint_status,
+        r.eslint_errors_count AS eslint_errors_count,
+        r.security_score AS security_score,
+        r.quality_score AS quality_score,
+        prl.accepted AS project_license_accepted
       FROM features f
-      JOIN repositories r ON f.repoid = r.id
+      JOIN repositories r ON f.repo_id = r.id
+      LEFT JOIN project_features pf
+        ON pf.feature_id = f.id
+      LEFT JOIN project_repo_licenses prl
+        ON prl.repository_id = r.id
     `;
 
-    const params: any[] = [];
-
     if (projectId) {
+      params.push(projectId, projectId);
       query += `
-        JOIN project_features pf ON pf.feature_id = f.id
+        AND pf.project_id = $1
+        AND prl.project_id = $2
       `;
     }
 
     query += `
       WHERE
         f.approved = true
-        AND r.licenserisktier IS NOT NULL
-        AND r.licenserisktier != 'blocked'
-        AND (r.licenserisktier != 'risky' OR r.licenseaccepted = true)
-        AND r.eslintstatus = 'pass'
+        AND r.license_risk_tier IS NOT NULL
+        AND r.license_risk_tier != 'blocked'
+        AND r.eslint_status = 'pass'
     `;
-    // NOTE: later you can align this WHERE with licensePolicy helpers
 
     if (projectId) {
-      params.push(projectId);
       query += `
-        AND pf.project_id = $${params.length}
         AND pf.enabled = true
+        AND (
+          r.license_risk_tier != 'risky'
+          OR prl.accepted = true
+        )
+      `;
+    } else {
+      // No project context: fall back to global acceptance for risky
+      query += `
+        AND (
+          r.license_risk_tier != 'risky'
+          OR r.license_accepted = true
+        )
       `;
     }
 
@@ -89,8 +104,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 
 /**
  * GET /capabilities/:id
- * Get a single capability by feature id, only if it is approved, license-safe and ESLint-passing,
- * and (if projectId is present) enabled for that project.
+ * Same rules, but for a specific feature id.
  */
 router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
@@ -98,7 +112,7 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
     const { id } = authReq.params;
     const featureId = Number(id);
 
-    const rawProjectId = (authReq.user as any)?.projectId;
+    const rawProjectId = authReq.user?.projectId;
     const projectId =
       rawProjectId != null && !Number.isNaN(Number(rawProjectId))
         ? Number(rawProjectId)
@@ -108,6 +122,8 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid capability id' });
     }
 
+    const params: any[] = [featureId];
+
     let query = `
       SELECT
         f.id AS feature_id,
@@ -116,23 +132,28 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
         f.status AS feature_status,
         f.approved AS feature_approved,
         r.id AS repository_id,
-        r.githuburl AS repository_github_url,
+        r.github_url AS repository_github_url,
         r.name AS repository_name,
-        r.licenserisktier AS license_risk_tier,
-        r.licenseaccepted AS license_accepted,
-        r.eslintstatus AS eslint_status,
-        r.eslinterrorscount AS eslint_errors_count,
-        r.securityscore AS security_score,
-        r.qualityscore AS quality_score
+        r.license_risk_tier AS license_risk_tier,
+        r.license_accepted AS license_accepted_global,
+        r.eslint_status AS eslint_status,
+        r.eslint_errors_count AS eslint_errors_count,
+        r.security_score AS security_score,
+        r.quality_score AS quality_score,
+        prl.accepted AS project_license_accepted
       FROM features f
-      JOIN repositories r ON f.repoid = r.id
+      JOIN repositories r ON f.repo_id = r.id
+      LEFT JOIN project_features pf
+        ON pf.feature_id = f.id
+      LEFT JOIN project_repo_licenses prl
+        ON prl.repository_id = r.id
     `;
 
-    const params: any[] = [featureId];
-
     if (projectId) {
+      params.push(projectId, projectId);
       query += `
-        JOIN project_features pf ON pf.feature_id = f.id
+        AND pf.project_id = $2
+        AND prl.project_id = $3
       `;
     }
 
@@ -140,17 +161,25 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
       WHERE
         f.id = $1
         AND f.approved = true
-        AND r.licenserisktier IS NOT NULL
-        AND r.licenserisktier != 'blocked'
-        AND (r.licenserisktier != 'risky' OR r.licenseaccepted = true)
-        AND r.eslintstatus = 'pass'
+        AND r.license_risk_tier IS NOT NULL
+        AND r.license_risk_tier != 'blocked'
+        AND r.eslint_status = 'pass'
     `;
 
     if (projectId) {
-      params.push(projectId);
       query += `
-        AND pf.project_id = $${params.length}
         AND pf.enabled = true
+        AND (
+          r.license_risk_tier != 'risky'
+          OR prl.accepted = true
+        )
+      `;
+    } else {
+      query += `
+        AND (
+          r.license_risk_tier != 'risky'
+          OR r.license_accepted = true
+        )
       `;
     }
 

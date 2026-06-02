@@ -3,17 +3,28 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.requireFeatureApproved = requireFeatureApproved;
 const db_1 = require("../db");
 const logger_1 = require("../logger");
+/**
+ * Global feature/repository health gate.
+ *
+ * Ensures:
+ * - Feature exists by name.
+ * - Feature is approved.
+ * - Repository license_risk_tier is not blocked.
+ * - Repository ESLint status is pass.
+ * - Latest security scan (if exists) passed.
+ *
+ * Does NOT enforce per-project license acceptance; that is handled by licenseGuard.
+ */
 function requireFeatureApproved(featureName) {
     return async function (req, res, next) {
         try {
-            // Look up feature by name and join repo
             const result = await db_1.pool.query(`
           SELECT
-            f.id as feature_id,
-            f.name as feature_name,
-            f.status as feature_status,
-            f.repo_id as feature_repo_id,
-            r.id as repo_id,
+            f.id AS feature_id,
+            f.name AS feature_name,
+            f.status AS feature_status,
+            f.repo_id AS feature_repo_id,
+            r.id AS repo_id,
             r.license_risk_tier,
             r.license_accepted,
             r.eslint_status,
@@ -31,12 +42,9 @@ function requireFeatureApproved(featureName) {
             if (row.feature_status !== 'approved') {
                 return res.status(403).json({ error: 'Feature not approved' });
             }
-            // License gate
+            // Global license risk gate (no per-project acceptance here)
             if (row.license_risk_tier === 'blocked') {
                 return res.status(403).json({ error: 'Blocked license' });
-            }
-            if (row.license_risk_tier === 'risky' && !row.license_accepted) {
-                return res.status(403).json({ error: 'Risky license not accepted' });
             }
             // ESLint quality gate
             if (row.eslint_status !== 'pass') {
@@ -60,7 +68,7 @@ function requireFeatureApproved(featureName) {
                     .status(403)
                     .json({ error: 'Latest security scan did not pass' });
             }
-            // Attach to req for downstream usage
+            // Attach to req for downstream usage / logging
             req.feature = {
                 id: row.feature_id,
                 name: row.feature_name,
@@ -77,8 +85,10 @@ function requireFeatureApproved(featureName) {
             return next();
         }
         catch (error) {
-            logger_1.logger.error({ error }, 'requireFeatureApproved failed');
-            return res.status(500).json({ error: 'Feature approval check failed' });
+            logger_1.logger.error({ error: error?.message || String(error) }, 'requireFeatureApproved failed');
+            return res
+                .status(500)
+                .json({ error: 'Feature approval check failed', details: error?.message || String(error) });
         }
     };
 }

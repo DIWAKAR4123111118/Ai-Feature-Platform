@@ -34,8 +34,8 @@ async function assertRepositoryLicenseAllowsExecution(repositoryId) {
     }
 }
 /**
- * Feature+repo-scoped guard for internal feature runs.
- * Optional projectId allows future per-project acceptance checks.
+ * Feature+repo-scoped guard for internal and project-scoped runs.
+ * If projectId is provided, consult project_repo_licenses for per-project acceptance.
  */
 async function assertFeatureRepositoryLicenseAllowsExecution(featureId, repositoryId, projectId) {
     const fr = await prismaClient_1.prisma.feature_repositories.findUnique({

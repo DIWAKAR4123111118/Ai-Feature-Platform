@@ -11,7 +11,6 @@ const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1h';
 function signToken(payload) {
     const options = {
         algorithm: 'HS256',
-        // env gives us a generic string; cast to satisfy SignOptions' StringValue union
         expiresIn: JWT_EXPIRES_IN,
     };
     return jsonwebtoken_1.default.sign(payload, JWT_SECRET, options);

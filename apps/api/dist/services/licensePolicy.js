@@ -4,7 +4,12 @@ exports.LICENSE_TIERS = void 0;
 exports.isLicenseSafeToExpose = isLicenseSafeToExpose;
 exports.isLicenseRisky = isLicenseRisky;
 exports.isLicenseBlocked = isLicenseBlocked;
-exports.LICENSE_TIERS = ['safe', 'risky', 'blocked', 'unknown'];
+exports.LICENSE_TIERS = [
+    'safe',
+    'risky',
+    'blocked',
+    'unknown',
+];
 function isLicenseSafeToExpose(tier) {
     return tier === 'safe';
 }

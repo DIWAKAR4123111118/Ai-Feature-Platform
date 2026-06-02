@@ -45,7 +45,7 @@ router.post('/projects/:projectId/repositories/:repoId/license/accept', auth_1.a
             },
             update: {
                 accepted: true,
-                accepted_by: authReq.user.email,
+                accepted_by: authReq.user.email ?? null,
                 accepted_at: new Date(),
                 license_tier: licenseTier,
             },
@@ -53,7 +53,7 @@ router.post('/projects/:projectId/repositories/:repoId/license/accept', auth_1.a
                 project_id: projectIdNum,
                 repository_id: repoIdNum,
                 accepted: true,
-                accepted_by: authReq.user.email,
+                accepted_by: authReq.user.email ?? null,
                 accepted_at: new Date(),
                 license_tier: licenseTier,
             },

@@ -1,27 +1,60 @@
 // apps/api/src/main.ts
-import app from './app';
-import { config } from './config/env';
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
 import { logger } from './logger';
+import internalRouter from './routes/internal';
+import capabilitiesCatalogRouter from './routes/capabilitiesCatalog';
+import capabilitiesExecuteRouter from './routes/capabilitiesExecute';
+import projectsRouter from './routes/projects';
+import capabilityExecuteRouter from './routes/capabilityExecute'; // legacy/internal by featureId
+import executionsRouter from './routes/executions';
+import { startAdapterWorker } from './workers/adapterWorker';
 
-const port = config.port || 3000;
+console.log('*** main.ts loaded ***');
 
-const server = app.listen(port, () => {
-  logger.info({ port, env: config.nodeEnv }, 'API server started');
+dotenv.config();
+
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+
+// Legacy featureId executor is now internal-only
+console.log(
+  'capabilityExecuteRouter typeof:',
+  typeof capabilityExecuteRouter,
+  'hasUse:',
+  typeof (capabilityExecuteRouter as any).use,
+);
+
+// PUBLIC / API-KEY ROUTES (capability catalog + execution by slug)
+app.use('/capabilities', capabilitiesCatalogRouter);
+app.use('/capabilities', capabilitiesExecuteRouter);
+
+// PUBLIC / API-KEY EXECUTION RETRIEVAL
+app.use('/executions', executionsRouter);
+
+// INTERNAL SERVICE ROUTES (JWT-authenticated, used by workers/adapters)
+app.use('/internal', internalRouter);
+
+// INTERNAL ADMIN ROUTES (tenants/projects/api keys)
+app.use('/internal', projectsRouter);
+
+// INTERNAL LEGACY FEATURE-ID EXECUTOR
+app.use('/internal', capabilityExecuteRouter);
+
+// Healthcheck
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok' });
 });
 
-const shutdown = () => {
-  logger.info('Shutdown signal received, closing server');
+const PORT = Number(process.env.PORT || 3000);
+const ENV = process.env.NODE_ENV || 'development';
 
-  server.close(err => {
-    if (err) {
-      logger.error({ err }, 'Error during server close');
-      process.exit(1);
-    }
+// Start BullMQ worker in this process for now
+startAdapterWorker();
 
-    logger.info('Server closed cleanly');
-    process.exit(0);
-  });
-};
-
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+app.listen(PORT, () => {
+  logger.info({ port: PORT, env: ENV }, 'API server started');
+});

@@ -1,62 +1,66 @@
 // apps/api/src/workers/adapterWorker.ts
 import { Worker, Job } from 'bullmq';
-import { executeAdapter } from '../services/adapterExecutor';
+import { ADAPTER_QUEUE_NAME } from '../queue/adapterQueue';
+import { getRedisConfig, isQueueEnabled } from '../config/redis';
 import { prisma } from '../prismaClient';
-import { logger } from '../logger';
+import { executeAdapter } from '../services/adapterExecutor';
 
 interface AdapterJobData {
-  repositoryId: number;
-  featureId?: number | null;
-  projectId?: number | null;
+  executionId: string;
   adapterName: string;
+  repositoryId: number;
+  featureId: number;
+  projectId: number | null;
+  tenantId: number | null;
   filePath?: string | null;
   input: any;
 }
 
-const worker = new Worker<AdapterJobData>(
-  'adapter-executions',
-  async (job: Job<AdapterJobData>) => {
-    const { repositoryId, featureId, adapterName, filePath, input, projectId } =
-      job.data;
+export function startAdapterWorker() {
+  if (!isQueueEnabled()) {
+    console.log('[worker] Queue disabled; not starting adapter worker');
+    return;
+  }
 
-    logger.info(
-      { jobId: job.id, repositoryId, featureId, projectId, adapterName },
-      'Processing adapter job',
-    );
+  const worker = new Worker<AdapterJobData>(
+    ADAPTER_QUEUE_NAME,
+    async (job: Job<AdapterJobData>) => {
+      const {
+        executionId,
+        adapterName,
+        repositoryId,
+        featureId,
+        projectId,
+        input,
+      } = job.data;
 
-    const result = await executeAdapter({
-      repositoryId,
-      featureId: featureId ?? null,
-      adapterName,
-      filePath: filePath ?? null,
-      input,
-    });
-
-    if (projectId) {
-      await prisma.adapter_executions.update({
-        where: { id: result.id },
-        data: {
-          project_id: projectId,
-        },
+      const exec = await prisma.adapter_executions.findUnique({
+        where: { id: executionId },
       });
-    }
 
-    return result;
-  },
-  {
-    connection: {
-      url: process.env.REDIS_URL ?? 'redis://localhost:6379',
+      if (!exec) {
+        throw new Error(`adapter_execution not found: ${executionId}`);
+      }
+
+      await executeAdapter({
+        executionId,
+        repositoryId,
+        featureId,
+        projectId,
+        adapterName,
+        input,
+      });
     },
-  },
-);
-
-worker.on('completed', (job) => {
-  logger.info({ jobId: job.id }, 'Adapter job completed');
-});
-
-worker.on('failed', (job, err) => {
-  logger.error(
-    { jobId: job?.id, error: err?.message || String(err) },
-    'Adapter job failed',
+    {
+      connection: getRedisConfig(),
+    },
   );
-});
+
+  worker.on('completed', (job) => {
+    console.log('[worker] job completed', job.id);
+  });
+
+  worker.on('failed', (job, err) => {
+    console.error('[worker] job failed', job?.id, err);
+  });
+}

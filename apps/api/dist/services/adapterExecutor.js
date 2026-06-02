@@ -16,7 +16,7 @@ class AdapterExecutionError extends Error {
 }
 exports.AdapterExecutionError = AdapterExecutionError;
 async function executeAdapter(params) {
-    const { repositoryId, featureId = null, adapterName, filePath = null, input, } = params;
+    const { repositoryId, featureId = null, projectId = null, adapterName, filePath = null, input, } = params;
     if (adapterName !== 'eslint') {
         throw new AdapterExecutionError(`Unsupported adapter: ${adapterName}`);
     }
@@ -25,6 +25,7 @@ async function executeAdapter(params) {
         data: {
             repository_id: repositoryId,
             feature_id: featureId,
+            project_id: projectId,
             adapter_name: adapterName,
             file_path: filePath,
             input,
@@ -69,6 +70,7 @@ async function executeAdapter(params) {
                 executionId: execution.id,
                 repositoryId,
                 featureId,
+                projectId,
                 adapterName,
                 status,
                 duration,
@@ -95,6 +97,7 @@ async function executeAdapter(params) {
             executionId: execution.id,
             repositoryId,
             featureId,
+            projectId,
             adapterName,
             status,
             duration,
@@ -122,6 +125,7 @@ async function executeAdapter(params) {
             executionId: execution.id,
             repositoryId,
             featureId,
+            projectId,
             adapterName,
             error: err?.message || String(err),
             duration,

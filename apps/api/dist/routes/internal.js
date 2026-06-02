@@ -41,6 +41,7 @@ router.post('/features/:id/run', auth_1.authMiddleware, (0, requireFeatureApprov
         const result = await (0, adapterExecutor_1.executeAdapter)({
             repositoryId,
             featureId,
+            projectId, // IMPORTANT: pass projectId
             adapterName,
             filePath: null,
             input,

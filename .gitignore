@@ -1,2 +1,5 @@
 node_modules
 .env
+# No duplicate Prisma migrations under API
+apps/api/prisma/migrations/
+
